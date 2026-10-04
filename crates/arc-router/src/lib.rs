@@ -260,6 +260,12 @@ impl Algorithm for ArcRouter {
         {
             return Err(error("ARC response schema or package mismatch"));
         }
+        if !decision["decision"]["selected_arm_id"]
+            .as_str()
+            .is_some_and(sha256)
+        {
+            return Err(error("ARC response has no valid selected arm"));
+        }
         let selected = decision["decision"]["selected_action_id"]
             .as_str()
             .ok_or_else(|| error("ARC response has no selected action"))?;
@@ -365,7 +371,10 @@ mod tests {
             }),
         }
     }
-    async fn worker(bad_hash: bool) -> (String, tokio::task::JoinHandle<Value>) {
+    async fn worker(
+        bad_hash: bool,
+        arm: Option<String>,
+    ) -> (String, tokio::task::JoinHandle<Value>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!(
             "http://{}/v1/rayline/arc/policy/decide",
@@ -393,7 +402,7 @@ mod tests {
                 }
             };
             let received: Value = serde_json::from_slice(&bytes[start..start + length]).unwrap();
-            let result = json!({"schema_version":"rayline.arc.policy-decision-response.v1", "package":{"alias":"synthetic", "package_sha256":if bad_hash {"d".repeat(64)} else {"a".repeat(64)}}, "decision":{"selected_action_id":"b".repeat(64)}}).to_string();
+            let result = json!({"schema_version":"rayline.arc.policy-decision-response.v1", "package":{"alias":"synthetic", "package_sha256":if bad_hash {"d".repeat(64)} else {"a".repeat(64)}}, "decision":{"selected_action_id":"b".repeat(64),"selected_arm_id":arm}}).to_string();
             socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", result.len(), result).as_bytes()).await.unwrap();
             received
         });
@@ -401,8 +410,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refuses_missing_or_invalid_selected_arm() {
+        for arm in [None, Some(String::new()), Some("invalid".into())] {
+            let (endpoint, worker) = worker(false, arm).await;
+            let router = Arc::new(ArcRouter::new(config(endpoint)).unwrap());
+            let result = drive(
+                router,
+                request(),
+                Arc::new(RuntimeModels::default()),
+                |_| async { panic!("unexpected classifier call") },
+            )
+            .await;
+            assert!(result.is_err());
+            worker.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn routes_through_native_algorithm_and_encodes_selected_controls() {
-        let (endpoint, worker) = worker(false).await;
+        let (endpoint, worker) = worker(false, Some("e".repeat(64))).await;
         let input = request();
         let original = input.raw_request.clone().unwrap();
         let outcome = drive(
@@ -436,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_wrong_package_without_fallback() {
-        let (endpoint, worker) = worker(true).await;
+        let (endpoint, worker) = worker(true, Some("e".repeat(64))).await;
         let outcome = drive(
             Arc::new(ArcRouter::new(config(endpoint)).unwrap()),
             request(),
