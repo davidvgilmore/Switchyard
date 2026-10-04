@@ -154,6 +154,16 @@ are required. All configured semantic names use exact ASCII case-insensitive mat
 handoff notes, per-tier system prompts, and a capability-judge fallback are documented in
 [Stage-Router Routing](../../docs/routing_algorithms/stage_router_routing.md).
 
+## ARC sessions
+
+Build with `--features arc-router` to use an optional local ARC service from
+the ordinary `/v1/messages` endpoint. Configure an `arc` route with an external
+bindings file and its `session` object. The service owns local inference and
+private steering; the server owns response settlement. See the
+[ARC adapter](../arc-router/README.md#native-messages-sessions) for configuration,
+identity headers, and current limits. This feature has synthetic HTTP integration
+coverage; it is not a claim of local model or reference-decision parity.
+
 ## Model discovery
 
 `GET /v1/models` returns the standard `data` list and an empty Codex `models` list.

@@ -52,6 +52,49 @@ The adapter checks the returned schema, package pin, and selected action against
 request eligibility. Errors propagate without a default model or fallback list.
 The response is retained in outcome evidence for the acceptance driver.
 
+## Native Messages sessions
+
+For ordinary HTTP clients, add an optional `session` object to the bindings:
+
+```json
+{ "session": { "endpoint": "http://127.0.0.1:18900", "owner_id": "my-host" } }
+```
+
+The operator runs this local service separately. It exposes `/prepare`, `/commit`,
+and `/abort`. Switchyard sends the complete original Messages body, operation
+identity, normalized conversation and agent lineage, eligible action IDs, and
+optional `x-switchyard-compaction-ordinal` to `/prepare`. The service owns the
+private steering ledger, attribution matching, concurrency, and local ARC
+execution. Missing session identity is refused. Existing Claude Code identity
+headers work; other clients can send `x-switchyard-session-id` and optional
+`x-switchyard-agent-id`, `x-switchyard-parent-agent-id`, and
+`x-switchyard-request-id`. Compaction ordinals must be positive integers.
+
+The prepared reply carries a session token, exact package and decision identity,
+`request_format`, and final `request`. Its destination must match the selected
+eligible action. Only native Messages dispatch is supported. The worker applies
+private append instructions and a fixed per-model thinking baseline before
+encoding. Action `controls` must be empty in session mode. Stage 2 must not
+change that native baseline. Switchyard retains the exact prepared body through
+a process-local typed marker; this cannot be enabled through client JSON or
+headers. A backend override or changed body is refused.
+
+The server commits after a successful buffered response or native SSE
+`message_stop` reaches its HTTP body consumer. It captures the actual emitted
+content blocks, including tool IDs and signed thinking. Unknown stream shapes
+retain unknown attribution. Errors, missing terminal events, and detected
+response cancellation abort the staged operation. This measures acceptance by
+the HTTP transport, not a remote client acknowledgment. Settlement failure is
+logged and requires service recovery. Process crashes, lost prepare replies,
+and restart recovery require an operator-managed durable service; this adapter
+does not supply one. Cancellation while `/prepare` is in flight can leave a
+transaction whose token never reached this process. A failed settlement can
+leave an uncertain transaction. Durable exactly-once session acceptance remains
+open; these synthetic tests do not establish it.
+
+Without `session`, explicit replay mode and its required `arc_context` remain
+unchanged. Session mode does not enable Chat or Responses conversion.
+
 ## Design choices
 
 A separate algorithm crate follows the existing `prefill-router` boundary and
@@ -60,6 +103,14 @@ was considered, but the existing HTTP LLM driver rejects those calls; it would
 need new transport plumbing. A gateway-only shim would bypass native routing
 outcomes and algorithm observability. The runner integration is behind an
 optional Cargo feature, like the existing learned router.
+
+The session lifecycle belongs at the existing server response boundary, while
+request preparation stays in the optional algorithm crate. A gateway-only
+implementation would bypass native routing. A generic metadata bypass for
+provider transformations would be too broad, so this path uses a typed native
+Messages request checked against the final encoded body. Reimplementing the
+private ledger inside Rust would duplicate policy/session logic; the local
+service owns it instead.
 
 Unlike the prefill router, ARC receives the full conversation every turn and
 does not add user-turn affinity or silently truncate history.
@@ -73,8 +124,10 @@ do not execute an encoder, load Hugging Face weights, or establish ARC parity.
 Remaining acceptance requires pinned private package weights, actual local
 encoder and both heads, VSR reference decisions, matching session sequences,
 all package actions (including steering), and final provider-wire comparison.
-Stock server ingress does not yet create ARC context metadata automatically;
-an embedding or acceptance driver must supply it. Keep private catalogs,
+Ordinary native Messages ingress can use the session mode above. Its HTTP
+composition tests use a synthetic service and provider; they establish no
+local encoder, head, or reference-decision parity. Explicit replay still needs
+an embedding or acceptance driver to supply context. Keep private catalogs,
 weights, fixtures, and credentials out of this repository.
 
 Run the acceptance helper with external private files:

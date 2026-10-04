@@ -1,5 +1,8 @@
 //! Local ARC policy decisions through Switchyard's native algorithm interface.
 
+mod session;
+pub use session::{SessionConfig, SessionReceipt};
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -13,7 +16,7 @@ use switchyard_translation::{TranslationEngine, TranslationPolicy};
 #[serde(deny_unknown_fields)]
 pub struct ActionBinding {
     pub target: String,
-    /// Must be empty until steering placement is supported.
+    /// Empty in replay mode; the session service owns private steering placement.
     pub steering_suffix: String,
     /// Source format this binding has been validated against.
     pub request_format: String,
@@ -29,6 +32,9 @@ pub struct ArcConfig {
     pub package_alias: String,
     pub package_sha256: String,
     pub actions: BTreeMap<String, ActionBinding>,
+    /// Optional host-owned session service. Absent preserves explicit replay mode.
+    #[serde(default)]
+    pub session: Option<SessionConfig>,
 }
 
 /// An ARC algorithm with no numerical model implementation in Switchyard.
@@ -68,8 +74,16 @@ impl ArcRouter {
                 "ARC requires a package alias, SHA256, and action bindings",
             ));
         }
+        if let Some(session) = &config.session {
+            session.validate()?;
+        }
         for (id, action) in &config.actions {
-            if !action.steering_suffix.is_empty() {
+            if config.session.is_some() && !action.controls.is_empty() {
+                return Err(error(
+                    "ARC session controls belong to the worker baseline, not action bindings",
+                ));
+            }
+            if config.session.is_none() && !action.steering_suffix.is_empty() {
                 return Err(error("ARC steering placement is not yet supported"));
             }
             if !sha256(id)
@@ -237,6 +251,9 @@ impl Algorithm for ArcRouter {
         _driver: Driver,
         mut request: Request,
     ) -> switchyard_libsy::Result<RoutingOutcome> {
+        if self.config.session.is_some() {
+            return self.route_session(request).await;
+        }
         let (payload, mut body, format) = self.prepare(&request)?;
         let response = self
             .client
@@ -344,6 +361,7 @@ mod tests {
     fn config(endpoint: String) -> ArcConfig {
         ArcConfig {
             endpoint,
+            session: None,
             package_alias: "synthetic".into(),
             package_sha256: "a".repeat(64),
             actions: BTreeMap::from([(

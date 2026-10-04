@@ -199,12 +199,23 @@ pub struct Metadata {
     pub subagent_identity_unsupported: bool,
     /// Switchyard target that successfully served a response.
     pub served_model: Option<ModelId>,
+    /// A host-prepared native Messages request whose controls and cache intent must survive dispatch.
+    /// This is process-local metadata; HTTP headers and request JSON cannot create it.
+    pub prepared_messages: Option<PreparedMessages>,
     /// Arbitrary host-defined key/value metadata.
     pub extra_metadata: Option<BTreeMap<String, String>>,
     /// HTTP headers to attach when forwarding the request/response, if any.
     pub http_headers: Option<http::HeaderMap>,
     /// The wire format the request/response was originally encoded in, if known.
     pub wire_format: Option<WireFormat>,
+}
+
+/// Native Messages prepared by a trusted routing algorithm.
+/// The HTTP client verifies the destination and complete encoded body before sending.
+#[derive(Clone)]
+pub struct PreparedMessages {
+    /// Exact final Messages body, including its destination model.
+    pub body: serde_json::Value,
 }
 
 impl Metadata {
