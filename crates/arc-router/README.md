@@ -144,6 +144,52 @@ same-session queue and uncertain-ACK fence apply. This authenticates and
 transports the selected request; synthetic tests do not qualify model inference,
 all catalog actions, or the private codec implementation itself.
 
+## Use an installed session runtime
+
+An ARC deployment can supply a separate session-runtime bundle. Install the
+pinned bundle in a new private directory. Keep its package manifest, provider
+settings and full action catalog outside this repository. The bundle contains
+no encoder, heads, model weights or provider keys. Run the numerical policy
+service separately.
+
+Use unused ports and isolated runtime/server configuration when testing beside
+existing agent sessions. These steps require no global client settings changes.
+
+Set `ARC_RUNTIME` to the installation directory and the other variables below
+to your private settings file, package manifest and package alias. Read the
+codec identity from the installed launcher:
+
+```sh
+"$ARC_RUNTIME/arc-session" --settings "$ARC_SETTINGS" --package "$ARC_PACKAGE" \
+  --package-alias "$ARC_PACKAGE_ALIAS" --describe-config
+```
+
+Copy `codec_sha256` into the bindings file's `session` object. This pin includes
+provider and backend profiles. It is not just the executable hash. Start the
+same launcher and settings with `--policy-endpoint
+http://127.0.0.1:9012/v1/rayline/arc/policy/decide --port 9013`. Set the session
+`endpoint` to `http://127.0.0.1:9013/experimental/arc/session`. Use a stable,
+distinct `owner_id` for this server.
+
+Run the ordinary server with the `arc-router` feature and its normal TOML config.
+For a prepared Chat target, use an `openai_chat` client and its usual
+`api_key_env` authentication. A Chat client using `forward_auth` cannot receive
+native Messages ingress. Keep action `controls` empty in session mode and retain
+the full catalog. An unsupported selected winner must fail, not select again.
+
+A llama usage profile must name the actual backend revision and executable
+identity. Its response model alias must match the prepared target. Early timing
+counts can support incremental output only when that exact profile verifies
+against final usage. Missing cache-creation fields stay absent. Other Chat
+providers may need final usage before translation and may refuse unknown cache
+partitions. This is not universal streaming or cache support.
+
+The session runtime keeps state in memory. Resolve an uncertain attempt before
+retrying; changing identity or restarting does not make it safe. Numeric ARC
+parity, durable recovery, Responses ingress and real-provider behavior need
+separate acceptance. Installation and synthetic transport checks alone do not
+make the integration ready to launch.
+
 ## Design choices
 
 A separate algorithm crate follows the existing `prefill-router` boundary and
