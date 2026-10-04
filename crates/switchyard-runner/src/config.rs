@@ -372,6 +372,16 @@ impl DeploymentConfig {
             let target = self.targets.get(name).ok_or_else(|| {
                 RunnerError::configuration(format!("route references unknown target {name}"))
             })?;
+            if matches!(route.algorithm, AlgorithmSpec::Arc { .. })
+                && (target.reasoning_effort.is_some()
+                    || !target.extra_body.is_empty()
+                    || !target.omit_body_fields.is_empty()
+                    || target.system_prompt.is_some())
+            {
+                return Err(RunnerError::configuration(format!(
+                    "ARC target {name} cannot override the selected request controls or prompt"
+                )));
+            }
             if let Some((first_name, first)) = targets_by_model.insert(&target.id, (name, target))
                 && first.llm_client != target.llm_client
             {

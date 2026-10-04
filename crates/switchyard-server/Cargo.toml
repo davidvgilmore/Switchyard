@@ -17,6 +17,7 @@ keywords = ["llm", "proxy", "routing", "openai", "anthropic"]
 publish = ["crates-io"]
 
 [features]
+arc-router = ["switchyard-runner/arc-router"]
 prefill-router = ["switchyard-runner/prefill-router"]
 
 [dependencies]

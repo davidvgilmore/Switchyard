@@ -1,0 +1,19 @@
+[package]
+name = "switchyard-arc-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+switchyard-libsy.workspace = true
+switchyard-protocol.workspace = true
+switchyard-translation.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

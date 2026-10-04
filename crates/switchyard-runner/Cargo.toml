@@ -14,9 +14,11 @@ rust-version.workspace = true
 publish = ["crates-io"]
 
 [features]
+arc-router = ["dep:switchyard-arc-router"]
 prefill-router = ["dep:prefill-router"]
 
 [dependencies]
+switchyard-arc-router = { path = "../arc-router", optional = true }
 libsy = { package = "switchyard-libsy", path = "../libsy", version = "0.3.0" }
 prefill-router = { workspace = true, optional = true }
 reqwest.workspace = true
