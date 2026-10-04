@@ -83,7 +83,12 @@ The server commits after a successful buffered response or native SSE
 `message_stop` reaches its HTTP body consumer. It captures the actual emitted
 content blocks, including tool IDs and signed thinking. Unknown stream shapes
 retain unknown attribution. Errors, missing terminal events, and detected
-response cancellation abort the staged operation. This measures acceptance by
+response cancellation abort the staged operation. The server queues requests
+for the same native conversation and agent until settlement returns, including
+abort cleanup. Other sessions can proceed concurrently. This process-local
+queue prevents an immediate tool continuation from racing the prior commit;
+it does not provide durable state or coordinate separate server processes.
+This measures acceptance by
 the HTTP transport, not a remote client acknowledgment. Settlement failure is
 logged and requires service recovery. Process crashes, lost prepare replies,
 and restart recovery require an operator-managed durable service; this adapter

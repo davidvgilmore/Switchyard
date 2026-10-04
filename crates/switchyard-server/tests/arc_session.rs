@@ -13,7 +13,17 @@ use std::{
 };
 use switchyard_server::{build_switchyard_router, config::load_server_state};
 
-type Log = Arc<Mutex<Vec<(String, Value)>>>;
+#[derive(Clone, Default)]
+struct Log {
+    events: Arc<Mutex<Vec<(String, Value)>>>,
+    commit_release: Arc<tokio::sync::Notify>,
+}
+impl std::ops::Deref for Log {
+    type Target = Mutex<Vec<(String, Value)>>;
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
 struct Host {
     url: String,
     task: tokio::task::JoinHandle<()>,
@@ -48,6 +58,12 @@ async fn prepare(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value>
     )
 }
 async fn commit(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value> {
+    if body["session_token"] == "delayed-commit" {
+        log.lock()
+            .unwrap()
+            .push(("commit-start".into(), body.clone()));
+        log.commit_release.notified().await;
+    }
     log.lock().unwrap().push(("commit".into(), body));
     Json(json!({"ok":true}))
 }
@@ -73,6 +89,11 @@ async fn provider(State(log): State<Log>, Json(body): Json<Value>) -> Response {
             json!({"type":"content_block_stop","index":0}),
             json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}),
         ];
+        if body["max_tokens"] == 8 {
+            events.insert(5, json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"sample.rs"}}}));
+            events.insert(6, json!({"type":"content_block_stop","index":1}));
+            events[7]["delta"]["stop_reason"] = json!("tool_use");
+        }
         if body["max_tokens"] != 2 && body["max_tokens"] != 4 {
             events.push(json!({"type":"message_stop"}));
         }
@@ -318,5 +339,84 @@ async fn mismatched_receipt_action_owner_or_source_aborts_before_dispatch() {
             .unwrap()
             .iter()
             .any(|(kind, _)| kind == "provider")
+    );
+}
+
+#[tokio::test]
+async fn immediate_tool_continuation_waits_for_commit_without_blocking_other_sessions() {
+    use futures_util::StreamExt;
+    let f = Fixture::new().await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let url = format!("{}/v1/messages", f.host.url);
+    let response = client
+        .post(&url)
+        .header("x-switchyard-session-id", "delayed-conversation")
+        .header("x-switchyard-request-id", "delayed-commit")
+        .json(&request(8, true))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while !String::from_utf8_lossy(&bytes).contains("event: message_stop") {
+        bytes.extend_from_slice(&stream.next().await.unwrap().unwrap());
+    }
+    drop(stream);
+    f.settled("commit-start", 1).await;
+    let next_client = client.clone();
+    let next_url = url.clone();
+    let continuation = tokio::spawn(async move {
+        let mut body = request(32, false);
+        body["messages"].as_array_mut().unwrap().extend([
+            json!({"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"sample.rs"}}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"synthetic result"}]})
+        ]);
+        next_client
+            .post(next_url)
+            .header("x-switchyard-session-id", "delayed-conversation")
+            .header("x-switchyard-request-id", "immediate-next")
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    });
+    let other = client
+        .post(url)
+        .header("x-switchyard-session-id", "independent-conversation")
+        .header("x-switchyard-request-id", "independent")
+        .json(&request(32, false))
+        .send()
+        .await
+        .unwrap();
+    assert!(other.status().is_success());
+    other.text().await.unwrap();
+    {
+        let log = f.log.lock().unwrap();
+        assert!(
+            !log.iter()
+                .any(|(kind, body)| kind == "commit" && body["session_token"] == "delayed-commit"),
+            "independent session was blocked by delayed commit"
+        );
+    }
+    f.log.commit_release.notify_one();
+    continuation.await.unwrap();
+    let log = f.log.lock().unwrap();
+    let committed = log
+        .iter()
+        .position(|(kind, body)| kind == "commit" && body["session_token"] == "delayed-commit")
+        .expect("delayed commit acknowledged");
+    let prepared = log
+        .iter()
+        .position(|(kind, body)| kind == "prepare" && body["operation_id"] == "immediate-next")
+        .unwrap();
+    assert!(
+        committed < prepared,
+        "next tool turn prepared before previous commit acknowledgment"
     );
 }

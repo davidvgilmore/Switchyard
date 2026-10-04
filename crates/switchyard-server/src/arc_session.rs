@@ -5,20 +5,22 @@ use http_body_util::BodyExt;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     convert::Infallible,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, OnceLock, Weak},
     task::{Context, Poll},
 };
 use switchyard_arc_router::SessionReceipt;
 use switchyard_llm_client::{RunObservation, RunObserver};
-use tokio::sync::{mpsc, oneshot};
+use switchyard_protocol::Metadata;
+use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 
 #[derive(Default)]
 struct State {
     receipt: Option<SessionReceipt>,
     settled: bool,
+    gate: Option<OwnedMutexGuard<()>>,
 }
 struct Inner(Mutex<State>);
 impl Drop for Inner {
@@ -28,7 +30,9 @@ impl Drop for Inner {
             && let Some(receipt) = state.receipt.take()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
+            let gate = state.gate.take();
             runtime.spawn(async move {
+                let _gate = gate;
                 if receipt.settle(false, None).await.is_err() {
                     tracing::error!("ARC abort failed; session requires recovery");
                 }
@@ -41,6 +45,36 @@ pub(crate) struct Pending(Arc<Inner>);
 impl Pending {
     pub(crate) fn new() -> Self {
         Self(Arc::new(Inner(Mutex::new(State::default()))))
+    }
+    pub(crate) async fn queue(&self, metadata: Option<&Metadata>) {
+        type Key = (String, Option<String>, Option<String>);
+        type Gates = Mutex<HashMap<Key, Weak<tokio::sync::Mutex<()>>>>;
+        static GATES: OnceLock<Gates> = OnceLock::new();
+        let Some(metadata) = metadata else {
+            return;
+        };
+        let Some(session) = metadata.session_id.as_ref() else {
+            return;
+        };
+        let gate = {
+            let mut gates = GATES.get_or_init(Default::default).lock();
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            let key = (
+                session.clone(),
+                metadata.agent_id.clone(),
+                metadata.parent_agent_id.clone(),
+            );
+            match gates.get(&key).and_then(Weak::upgrade) {
+                Some(gate) => gate,
+                None => {
+                    let gate = Arc::new(tokio::sync::Mutex::new(()));
+                    gates.insert(key, Arc::downgrade(&gate));
+                    gate
+                }
+            }
+        };
+        let guard = gate.lock_owned().await;
+        self.0.0.lock().gate = Some(guard);
     }
     pub(crate) fn observer(&self, downstream: RunObserver) -> RunObserver {
         let pending = self.clone();
@@ -71,6 +105,7 @@ impl Pending {
         {
             tracing::error!("ARC settlement failed; session requires recovery");
         }
+        self.0.0.lock().gate.take();
     }
     pub(crate) fn transport(self, response: Response, streaming: bool) -> Response {
         if self.0.0.lock().receipt.is_none() {

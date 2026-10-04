@@ -1072,6 +1072,10 @@ async fn handle_llm_request(
     #[cfg(feature = "arc-router")]
     let arc_pending = arc_session::Pending::new();
     #[cfg(feature = "arc-router")]
+    if route.algorithm_name() == "arc" {
+        arc_pending.queue(request.metadata.as_ref()).await;
+    }
+    #[cfg(feature = "arc-router")]
     let observer = arc_pending.observer(observer);
     #[cfg(feature = "arc-router")]
     let arc_streaming = request
