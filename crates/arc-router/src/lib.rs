@@ -1,7 +1,7 @@
 //! Local ARC policy decisions through Switchyard's native algorithm interface.
 
 mod session;
-pub use session::{SessionConfig, SessionReceipt};
+pub use session::{SessionConfig, SessionReceipt, SessionRecoveryRequired};
 
 use async_trait::async_trait;
 use serde::Deserialize;

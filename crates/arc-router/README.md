@@ -89,8 +89,17 @@ abort cleanup. Other sessions can proceed concurrently. This process-local
 queue prevents an immediate tool continuation from racing the prior commit;
 it does not provide durable state or coordinate separate server processes.
 This measures acceptance by
-the HTTP transport, not a remote client acknowledgment. Settlement failure is
-logged and requires service recovery. Process crashes, lost prepare replies,
+the HTTP transport, not a remote client acknowledgment. Settlement requires a
+successful JSON reply whose `state` is exactly `committed` or `aborted` for the
+requested operation. Missing, malformed, wrong-state, or failed replies leave
+the outcome uncertain. The server then fences that native session and agent
+lineage before releasing its queue: later requests receive HTTP 409 before
+another prepare. This includes failed abort cleanup after invalid preparation
+or a dropped response. Other native sessions can still proceed. The fence is
+shared across routes within one server state so route aliases cannot bypass it;
+it is process-local and is not a durable recovery mechanism. Resolve the exact
+attempt through the operator-managed service and host recovery procedure; do
+not treat restarting the server as evidence that an uncertain outcome is safe. Process crashes, lost prepare replies,
 and restart recovery require an operator-managed durable service; this adapter
 does not supply one. Cancellation while `/prepare` is in flight can leave a
 transaction whose token never reached this process. A failed settlement can

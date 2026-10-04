@@ -161,6 +161,8 @@ struct DecisionLlmClientResponse {
 /// Shared server state used by all endpoint handlers.
 #[derive(Clone)]
 pub struct ServerState {
+    #[cfg(feature = "arc-router")]
+    arc_sessions: Arc<arc_session::Runtime>,
     runner: Arc<Runner>,
     redactor: Arc<redaction::Redactor>,
     fallback_http: reqwest::Client,
@@ -218,6 +220,8 @@ impl ServerState {
         );
         let redactor = redaction::Redactor::new(runner.provider_api_keys());
         Ok(Self {
+            #[cfg(feature = "arc-router")]
+            arc_sessions: Arc::default(),
             redactor: Arc::new(redactor),
             runner: Arc::new(runner),
             fallback_http,
@@ -1070,10 +1074,17 @@ async fn handle_llm_request(
     );
 
     #[cfg(feature = "arc-router")]
-    let arc_pending = arc_session::Pending::new();
+    let arc_pending = arc_session::Pending::new(state.arc_sessions.clone());
     #[cfg(feature = "arc-router")]
-    if route.algorithm_name() == "arc" {
-        arc_pending.queue(request.metadata.as_ref()).await;
+    if route.algorithm_name() == "arc"
+        && arc_pending.queue(request.metadata.as_ref()).await.is_err()
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            "ARC session settlement is uncertain; recovery required",
+            "invalid_request_error",
+            "arc_session_recovery_required",
+        );
     }
     #[cfg(feature = "arc-router")]
     let observer = arc_pending.observer(observer);
@@ -1087,6 +1098,12 @@ async fn handle_llm_request(
     let output = match route.execute(request, Some(observer)).await {
         Ok(output) => output,
         Err(error) => {
+            #[cfg(feature = "arc-router")]
+            if let RunnerError::Algorithm(LibsyError::External { source, .. }) = &error
+                && source.is::<switchyard_arc_router::SessionRecoveryRequired>()
+            {
+                arc_pending.quarantine();
+            }
             if let RunnerError::Algorithm(LibsyError::ClientCall {
                 target,
                 source:

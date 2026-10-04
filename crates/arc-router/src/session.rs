@@ -35,6 +35,28 @@ impl SessionConfig {
     }
 }
 
+/// Preparation failed and its cleanup was not acknowledged. The session must
+/// remain fenced; the original preparation error is retained as the source.
+#[derive(Debug)]
+pub struct SessionRecoveryRequired {
+    preparation: LibsyError,
+    settlement: String,
+}
+impl std::fmt::Display for SessionRecoveryRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; abort acknowledgement failed: {}; session requires recovery",
+            self.preparation, self.settlement
+        )
+    }
+}
+impl std::error::Error for SessionRecoveryRequired {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.preparation)
+    }
+}
+
 /// Process-owned receipt retained until the HTTP response reaches its terminal frame.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct SessionReceipt {
@@ -67,7 +89,7 @@ impl SessionReceipt {
                 json!(if output.is_some() { "known" } else { "unknown" });
             payload["response_messages"] = json!(output);
         }
-        client
+        let acknowledgement: Value = client
             .post(format!(
                 "{}/{}",
                 self.endpoint.trim_end_matches('/'),
@@ -78,7 +100,13 @@ impl SessionReceipt {
             .await
             .map_err(|_| "ARC settlement service unavailable")?
             .error_for_status()
-            .map_err(|_| "ARC settlement refused")?;
+            .map_err(|_| "ARC settlement refused")?
+            .json()
+            .await
+            .map_err(|_| "ARC settlement acknowledgement invalid")?;
+        if acknowledgement["state"] != if success { "committed" } else { "aborted" } {
+            return Err("ARC settlement acknowledgement state mismatch".into());
+        }
         Ok(())
     }
 }
@@ -230,11 +258,18 @@ impl ArcRouter {
             ));
             Ok(outcome)
         })();
-        if result.is_err() && transaction.settle(false, None).await.is_err() {
-            return Err(error(
-                "ARC preparation invalid; abort failed and session requires recovery",
-            ));
+        match result {
+            Err(preparation) => match transaction.settle(false, None).await {
+                Ok(()) => Err(preparation),
+                Err(settlement) => Err(LibsyError::external(
+                    "ARC preparation cleanup",
+                    SessionRecoveryRequired {
+                        preparation,
+                        settlement,
+                    },
+                )),
+            },
+            Ok(outcome) => Ok(outcome),
         }
-        result
     }
 }

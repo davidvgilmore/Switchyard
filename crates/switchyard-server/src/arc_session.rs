@@ -5,10 +5,10 @@ use http_body_util::BodyExt;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     convert::Infallible,
     pin::Pin,
-    sync::{Arc, OnceLock, Weak},
+    sync::{Arc, Weak},
     task::{Context, Poll},
 };
 use switchyard_arc_router::SessionReceipt;
@@ -16,8 +16,18 @@ use switchyard_llm_client::{RunObservation, RunObserver};
 use switchyard_protocol::Metadata;
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 
+type Key = (String, Option<String>, Option<String>);
+type Gates = HashMap<Key, Weak<tokio::sync::Mutex<()>>>;
+#[derive(Default)]
+pub(crate) struct Runtime {
+    gates: Mutex<Gates>,
+    uncertain: Mutex<HashSet<Key>>,
+}
+
 #[derive(Default)]
 struct State {
+    runtime: Arc<Runtime>,
+    key: Option<Key>,
     receipt: Option<SessionReceipt>,
     settled: bool,
     gate: Option<OwnedMutexGuard<()>>,
@@ -31,9 +41,14 @@ impl Drop for Inner {
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
             let gate = state.gate.take();
+            let recovery = state.runtime.clone();
+            let key = state.key.clone();
             runtime.spawn(async move {
                 let _gate = gate;
                 if receipt.settle(false, None).await.is_err() {
+                    if let Some(key) = key {
+                        recovery.uncertain.lock().insert(key);
+                    }
                     tracing::error!("ARC abort failed; session requires recovery");
                 }
             });
@@ -43,38 +58,51 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub(crate) struct Pending(Arc<Inner>);
 impl Pending {
-    pub(crate) fn new() -> Self {
-        Self(Arc::new(Inner(Mutex::new(State::default()))))
+    pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
+        Self(Arc::new(Inner(Mutex::new(State {
+            runtime,
+            ..State::default()
+        }))))
     }
-    pub(crate) async fn queue(&self, metadata: Option<&Metadata>) {
-        type Key = (String, Option<String>, Option<String>);
-        type Gates = Mutex<HashMap<Key, Weak<tokio::sync::Mutex<()>>>>;
-        static GATES: OnceLock<Gates> = OnceLock::new();
+    pub(crate) async fn queue(&self, metadata: Option<&Metadata>) -> Result<(), ()> {
         let Some(metadata) = metadata else {
-            return;
+            return Ok(());
         };
         let Some(session) = metadata.session_id.as_ref() else {
-            return;
+            return Ok(());
         };
+        let runtime = self.0.0.lock().runtime.clone();
+        let key = (
+            session.clone(),
+            metadata.agent_id.clone(),
+            metadata.parent_agent_id.clone(),
+        );
         let gate = {
-            let mut gates = GATES.get_or_init(Default::default).lock();
+            let mut gates = runtime.gates.lock();
             gates.retain(|_, gate| gate.strong_count() > 0);
-            let key = (
-                session.clone(),
-                metadata.agent_id.clone(),
-                metadata.parent_agent_id.clone(),
-            );
             match gates.get(&key).and_then(Weak::upgrade) {
                 Some(gate) => gate,
                 None => {
                     let gate = Arc::new(tokio::sync::Mutex::new(()));
-                    gates.insert(key, Arc::downgrade(&gate));
+                    gates.insert(key.clone(), Arc::downgrade(&gate));
                     gate
                 }
             }
         };
         let guard = gate.lock_owned().await;
-        self.0.0.lock().gate = Some(guard);
+        if runtime.uncertain.lock().contains(&key) {
+            return Err(());
+        }
+        let mut state = self.0.0.lock();
+        state.key = Some(key);
+        state.gate = Some(guard);
+        Ok(())
+    }
+    pub(crate) fn quarantine(&self) {
+        let state = self.0.0.lock();
+        if let Some(key) = state.key.as_ref() {
+            state.runtime.uncertain.lock().insert(key.clone());
+        }
     }
     pub(crate) fn observer(&self, downstream: RunObserver) -> RunObserver {
         let pending = self.clone();
@@ -103,6 +131,10 @@ impl Pending {
         if let Some(receipt) = receipt
             && receipt.settle(success, output).await.is_err()
         {
+            let state = self.0.0.lock();
+            if let Some(key) = state.key.as_ref() {
+                state.runtime.uncertain.lock().insert(key.clone());
+            }
             tracing::error!("ARC settlement failed; session requires recovery");
         }
         self.0.0.lock().gate.take();

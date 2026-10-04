@@ -57,19 +57,31 @@ async fn prepare(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value>
         json!({"owner_id":if body["request"]["max_tokens"] == 6 { json!("wrong-owner") } else { body["owner_id"].clone() },"action_id":if body["request"]["max_tokens"] == 5 { "d".repeat(64) } else { "a".repeat(64) },"source_request_format":if body["request"]["max_tokens"] == 7 { "openai_chat" } else { "anthropic_messages" },"session_token":body["operation_id"],"package_sha256":"b".repeat(64),"request_format":"anthropic_messages","request":prepared,"decision":{"schema_version":"rayline.arc.policy-decision-response.v1","package":{"alias":"synthetic","package_sha256":"b".repeat(64)},"decision":{"selected_action_id":"a".repeat(64),"selected_arm_id":"c".repeat(64)}}}),
     )
 }
-async fn commit(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value> {
+async fn commit(State(log): State<Log>, Json(body): Json<Value>) -> Response {
     if body["session_token"] == "delayed-commit" {
         log.lock()
             .unwrap()
             .push(("commit-start".into(), body.clone()));
         log.commit_release.notified().await;
     }
+    let token = body["session_token"].as_str().unwrap().to_owned();
+    let wrong = token == "wrong-commit-ack";
     log.lock().unwrap().push(("commit".into(), body));
-    Json(json!({"ok":true}))
+    if token == "missing-commit-ack" {
+        return Json(json!({"ok":true})).into_response();
+    }
+    if token == "malformed-commit-ack" {
+        return "not JSON".into_response();
+    }
+    if token == "lost-commit-ack" {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    Json(json!({"state":if wrong {"aborted"} else {"committed"}})).into_response()
 }
 async fn abort(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value> {
+    let wrong = body["session_token"] == "wrong-abort-ack";
     log.lock().unwrap().push(("abort".into(), body));
-    Json(json!({"ok":true}))
+    Json(json!({"state":if wrong {"committed"} else {"aborted"}}))
 }
 async fn provider(State(log): State<Log>, Json(body): Json<Value>) -> Response {
     log.lock().unwrap().push(("provider".into(), body.clone()));
@@ -419,4 +431,79 @@ async fn immediate_tool_continuation_waits_for_commit_without_blocking_other_ses
         committed < prepared,
         "next tool turn prepared before previous commit acknowledgment"
     );
+}
+
+#[tokio::test]
+async fn wrong_settlement_ack_fences_same_scope_without_blocking_another() {
+    for (operation, tokens, kind) in [
+        ("wrong-commit-ack", 32, "commit"),
+        ("missing-commit-ack", 32, "commit"),
+        ("malformed-commit-ack", 32, "commit"),
+        ("lost-commit-ack", 32, "commit"),
+        ("wrong-abort-ack", 2, "abort"),
+        ("wrong-abort-ack", 3, "abort"),
+    ] {
+        let f = Fixture::new().await;
+        let (_, first_body) = f.send(request(tokens, true), operation).await;
+        if tokens == 3 {
+            assert!(first_body.contains("ARC prepared destination"));
+        }
+        f.settled(kind, 1).await;
+        let (status, _) = f.send(request(32, false), "blocked-next").await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert!(
+            !f.log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(kind, body)| kind == "prepare" && body["operation_id"] == "blocked-next")
+        );
+        let other = reqwest::Client::new()
+            .post(format!("{}/v1/messages", f.host.url))
+            .header("x-switchyard-session-id", "other-conversation")
+            .header("x-switchyard-request-id", "other-operation")
+            .json(&request(32, false))
+            .send()
+            .await
+            .unwrap();
+        assert!(other.status().is_success());
+        other.text().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn failed_abort_after_disconnect_fences_only_its_scope() {
+    use futures_util::StreamExt;
+    let f = Fixture::new().await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/messages", f.host.url);
+    let response = client
+        .post(&url)
+        .header("x-switchyard-session-id", "cancel-fenced")
+        .header("x-switchyard-request-id", "wrong-abort-ack")
+        .json(&request(4, true))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    f.settled("abort", 1).await;
+    let next = client
+        .post(&url)
+        .header("x-switchyard-session-id", "cancel-fenced")
+        .header("x-switchyard-request-id", "after-cancel")
+        .json(&request(32, false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(next.status(), reqwest::StatusCode::CONFLICT);
+    assert!(
+        !f.log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(kind, body)| kind == "prepare" && body["operation_id"] == "after-cancel")
+    );
+    assert!(f.send(request(32, false), "unrelated").await.0.is_success());
 }
