@@ -2,7 +2,7 @@
 use super::*;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use switchyard_protocol::{PreparedMessages, WireFormat};
+use switchyard_protocol::{PinnedResponseCodec, PreparedChat, PreparedMessages, WireFormat};
 
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 
@@ -14,6 +14,9 @@ pub struct SessionConfig {
     pub endpoint: String,
     /// Stable host installation identity, separate from each conversation.
     pub owner_id: String,
+    /// Optional pinned Messages-return codec for prepared Chat providers.
+    #[serde(default)]
+    pub codec_sha256: Option<String>,
 }
 impl SessionConfig {
     pub(crate) fn validate(&self) -> switchyard_libsy::Result<()> {
@@ -30,6 +33,9 @@ impl SessionConfig {
             return Err(error(
                 "ARC session service requires a literal loopback HTTP URL and owner",
             ));
+        }
+        if self.codec_sha256.as_ref().is_some_and(|pin| !sha256(pin)) {
+            return Err(error("ARC codec SHA256 invalid"));
         }
         Ok(())
     }
@@ -73,6 +79,7 @@ impl SessionReceipt {
         SessionConfig {
             endpoint: self.endpoint.clone(),
             owner_id: self.owner_id.clone(),
+            codec_sha256: None,
         }
         .validate()
         .map_err(|e| e.to_string())?;
@@ -147,7 +154,9 @@ impl ArcRouter {
             .config
             .actions
             .iter()
-            .filter(|(_, a)| a.request_format == "anthropic_messages")
+            .filter(|(_, a)| {
+                session.codec_sha256.is_some() || a.request_format == "anthropic_messages"
+            })
             .map(|(id, _)| id.clone())
             .collect();
         if available.is_empty() {
@@ -208,7 +217,6 @@ impl ArcRouter {
                     != "rayline.arc.policy-decision-response.v1"
                 || receipt["decision"]["package"]
                     != json!({"alias":self.config.package_alias,"package_sha256":self.config.package_sha256})
-                || receipt["request_format"] != "anthropic_messages"
                 || receipt["source_request_format"] != "anthropic_messages"
                 || receipt["owner_id"] != session.owner_id
             {
@@ -230,26 +238,68 @@ impl ArcRouter {
             if body["model"] != binding.target || body.get("stream") != source_stream.as_ref() {
                 return Err(error("ARC prepared destination or streaming mode changed"));
             }
+            let chat = binding.request_format == "openai_chat";
+            if receipt["request_format"] != binding.request_format {
+                return Err(error("ARC prepared provider format mismatch"));
+            }
+            let codec = if chat {
+                let pin = session
+                    .codec_sha256
+                    .as_ref()
+                    .ok_or_else(|| error("ARC Chat codec not enabled"))?;
+                if receipt["response_codec"]
+                    != json!({"schema_version":"rayline.arc.response-codec.v1","source":"openai_chat","target":"anthropic_messages","implementation_sha256":pin})
+                {
+                    return Err(error("ARC response codec identity mismatch"));
+                }
+                Some(PinnedResponseCodec {
+                    endpoint: session.endpoint.clone(),
+                    owner_id: session.owner_id.clone(),
+                    session_token: token.into(),
+                    implementation_sha256: pin.clone(),
+                })
+            } else {
+                if binding.request_format != "anthropic_messages"
+                    || receipt.get("response_codec").is_some()
+                {
+                    return Err(error("unsupported ARC native provider format"));
+                }
+                None
+            };
             let decoded = TranslationEngine::default()
-                .decode_request("anthropic_messages", body, &TranslationPolicy::default())
-                .map_err(|_| error("ARC prepared Messages invalid"))?;
-            let encoded = TranslationEngine::default()
-                .encode_request(
-                    "anthropic_messages",
-                    &decoded.request,
+                .decode_request(
+                    binding.request_format.as_str(),
+                    body,
                     &TranslationPolicy::default(),
                 )
-                .map_err(|_| error("ARC prepared Messages cannot encode"))?;
-            if encoded.body != *body {
-                return Err(error("ARC prepared Messages changed during translation"));
+                .map_err(|_| error("ARC prepared request invalid"))?;
+            if !chat {
+                let encoded = TranslationEngine::default()
+                    .encode_request(
+                        "anthropic_messages",
+                        &decoded.request,
+                        &TranslationPolicy::default(),
+                    )
+                    .map_err(|_| error("ARC prepared Messages cannot encode"))?;
+                if encoded.body != *body {
+                    return Err(error("ARC prepared Messages changed during translation"));
+                }
             }
             request.llm_request = decoded.request;
             request.raw_request = Some(body.clone());
-            request
+            let metadata = request
                 .metadata
                 .as_mut()
-                .ok_or_else(|| error("ARC metadata missing"))?
-                .prepared_messages = Some(PreparedMessages { body: body.clone() });
+                .ok_or_else(|| error("ARC metadata missing"))?;
+            if let Some(codec) = codec {
+                metadata.prepared_chat = Some(PreparedChat {
+                    body: body.clone(),
+                    normalized: request.llm_request.clone(),
+                    codec,
+                });
+            } else {
+                metadata.prepared_messages = Some(PreparedMessages { body: body.clone() });
+            }
             let mut outcome =
                 RoutingOutcome::route_to(ModelId::from(binding.target.as_str()), vec![], request);
             outcome.metadata = Some(OutcomeMetadata::new(

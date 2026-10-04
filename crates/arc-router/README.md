@@ -72,7 +72,8 @@ headers work; other clients can send `x-switchyard-session-id` and optional
 
 The prepared reply carries a session token, exact package and decision identity,
 `request_format`, and final `request`. Its destination must match the selected
-eligible action. Only native Messages dispatch is supported. The worker applies
+eligible action. Native Messages dispatch is the default; the pinned Chat opt-in
+below adds a prepared Chat destination. The worker applies
 private append instructions and a fixed per-model thinking baseline before
 encoding. Action `controls` must be empty in session mode. Stage 2 must not
 change that native baseline. Switchyard retains the exact prepared body through
@@ -107,7 +108,41 @@ leave an uncertain transaction. Durable exactly-once session acceptance remains
 open; these synthetic tests do not establish it.
 
 Without `session`, explicit replay mode and its required `arc_context` remain
-unchanged. Session mode does not enable Chat or Responses conversion.
+unchanged. Responses conversion remains unsupported.
+
+## Prepared Chat destinations in Messages sessions
+
+Set `session.codec_sha256` to the operator-pinned return codec SHA-256 to allow
+a prepared Chat destination. The service must bind the receipt to the same
+owner, source Messages format, selected action, model and stream setting. Its
+`response_codec` must be `rayline.arc.response-codec.v1`, with source
+`openai_chat`, target `anthropic_messages` and the configured
+`implementation_sha256`. Without that opt-in, native Messages behavior stays
+unchanged. Replay mode cannot use this path.
+
+The host sends the prepared Chat body unchanged through the registered Chat
+backend and its usual authentication. Backend body overrides, omitted fields,
+and separate reasoning-effort overrides are refused. The service owns the fixed
+worker controls and private append. A prepared generation is dispatched once;
+ordinary backend retry settings do not repeat it. The process-only receipt and
+codec capability are never included in the provider body.
+
+The literal-loopback service exposes `/codec` beside prepare and settlement.
+Calls carry the receipt owner, token, configured implementation hash and an
+operation. `response` translates a buffered body. Streaming uses `stream_start`,
+then numbered `stream_push` calls with complete SSE frames, then `stream_finish`.
+Startup may omit `frames`; push and finish must return them. Every reply must
+match the configured hash. Provider and translated responses each have a 16 MiB
+limit. Codec calls have a ten-second timeout.
+
+The host holds native `message_stop` until it observes a provider finish reason,
+a complete `[DONE]` frame and successful codec finish. It does not wait for
+provider EOF. Exact codec-produced native JSON and events pass through the
+existing response preservation boundary; generic model and tool-name rewrites
+do not alter them. The existing successful-terminal settlement, disconnect abort,
+same-session queue and uncertain-ACK fence apply. This authenticates and
+transports the selected request; synthetic tests do not qualify model inference,
+all catalog actions, or the private codec implementation itself.
 
 ## Design choices
 
