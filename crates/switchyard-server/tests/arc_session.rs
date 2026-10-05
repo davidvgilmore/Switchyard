@@ -45,6 +45,10 @@ async fn prepare(State(log): State<Log>, Json(body): Json<Value>) -> Json<Value>
     log.lock().unwrap().push(("prepare".into(), body.clone()));
     let mut prepared = body["request"].clone();
     prepared["model"] = json!("synthetic-model");
+    // Match the pinned Messages codec's omitted false default.
+    if prepared["stream"] == false || body["request"]["max_tokens"] == 9 {
+        prepared.as_object_mut().unwrap().remove("stream");
+    }
     if body["request"]["max_tokens"] == 3 {
         prepared["model"] = json!("wrong-model");
     }
@@ -506,4 +510,23 @@ async fn failed_abort_after_disconnect_fences_only_its_scope() {
             .any(|(kind, body)| kind == "prepare" && body["operation_id"] == "after-cancel")
     );
     assert!(f.send(request(32, false), "unrelated").await.0.is_success());
+}
+
+#[tokio::test]
+async fn omitted_false_codec_default_dispatches_but_true_omission_aborts() {
+    let f = Fixture::new().await;
+    let (status, _) = f.send(request(16, false), "false-default").await;
+    assert!(status.is_success());
+    f.settled("commit", 1).await;
+    let (status, _) = f.send(request(9, true), "true-removed").await;
+    assert!(!status.is_success());
+    f.settled("abort", 1).await;
+    let mut null_stream = request(9, false);
+    null_stream["stream"] = Value::Null;
+    let (status, _) = f.send(null_stream, "null-removed").await;
+    assert!(!status.is_success());
+    let log = f.log.lock().unwrap();
+    let provider: Vec<_> = log.iter().filter(|(kind, _)| kind == "provider").collect();
+    assert_eq!(provider.len(), 1);
+    assert!(provider[0].1.get("stream").is_none());
 }

@@ -235,7 +235,13 @@ impl ArcRouter {
             }
             let binding = &self.config.actions[selected];
             let body = &receipt["request"];
-            if body["model"] != binding.target || body.get("stream") != source_stream.as_ref() {
+            // The pinned Messages codec omits the false default, but never true/null.
+            let omitted_false = binding.request_format == "anthropic_messages"
+                && source_stream == Some(Value::Bool(false))
+                && body.get("stream").is_none();
+            if body["model"] != binding.target
+                || (body.get("stream") != source_stream.as_ref() && !omitted_false)
+            {
                 return Err(error("ARC prepared destination or streaming mode changed"));
             }
             let chat = binding.request_format == "openai_chat";
