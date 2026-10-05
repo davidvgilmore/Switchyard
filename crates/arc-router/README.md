@@ -245,3 +245,67 @@ cargo run -p switchyard-arc-router --example decide -- /private/bindings.json /p
 It exercises libsy routing and prints the decision and outgoing source-format
 request. It never calls a destination model. Redirect its output to private
 scratch; it contains the supplied conversation.
+
+## Cloud-generation integration preview
+
+This preview runs the small ARC encoder and routing heads locally. Generation
+runs at configured cloud endpoints. It does not establish numerical parity with
+the reference runtime or availability of every provider in the catalog.
+
+Use the supplied private **OPERATOR-PREVIEW.md** and pinned checkpoint
+manifest for exact Hugging Face acquisition, checksum verification, installation,
+export, foreground startup and shutdown commands. `ARC_INSTALL` names the
+selected host installation; `ARC_SERVER_CONFIG` is its exported `switchyard.toml`. Keep the checksums, source pins, licenses and install receipts. Do not
+commit credentials or model files to this repository. The installed server must
+include the `arc-router` feature. A source build uses:
+
+```sh
+cargo build --locked --release -p switchyard-server --features arc-router
+```
+
+Use the installed setup helper with the exact package and provider settings to
+export the server TOML and ARC bindings. Retain the full action catalog. The
+numerical endpoint and session endpoint are separate loopback services. The
+session calls the numerical service; Switchyard calls the session; the selected
+generation target calls cloud HTTPS. Keep the session's configured codec hash
+and exported settings together. Start the services using the operator kit, then
+start the normal server with its exported configuration:
+
+```sh
+ARC_SERVER_CONFIG="$ARC_EXPORT/switchyard.toml"
+"$ARC_INSTALL/host/bin/switchyard-server" \
+  --config "$ARC_SERVER_CONFIG" --host 127.0.0.1 --port 18103
+```
+
+Use fresh configuration and state directories when running beside other clients.
+Switchyard exposes a native Messages API; it does not supply a Claude launcher.
+Point an isolated client's process-local base URL at this server. Keep client
+context and output limits explicit for the deployment, and do not modify global
+Claude or terminal settings. The preview uses cloud generation only. A local
+Qwen3.8-27B example must remain a separate, unselected configuration, absent from
+active targets and routes. Do not download, load or start it on this Mac, and do
+not configure it as automatic fallback.
+
+Session-mode action `controls` stay empty. The selected provider profile and
+pinned session prepare the native thinking baseline; private Stage 2 text is a
+separate on-change instruction. Do not infer native effort from an action name.
+The prepared body must remain exact through dispatch, including tools and cache
+intent. Missing provider usage remains unknown. Cache directives alone do not
+prove a cache read or write, and reported cost is not a final bill.
+
+An explicit `x-switchyard-request-id` becomes the session operation ID. Without
+it, the adapter generates a new ID. The session rejects redispatch of a committed
+operation and changed content under an aborted operation ID. A successful abort
+acknowledgement allows a retry under the service contract. Tool continuations
+wait for settlement; uncertain settlement fences that conversation and agent
+with HTTP 409. Resolve the receipt before attempting recovery. Restarting does
+not prove the previous attempt was safe.
+
+For a refusal, keep the original error and receipts. Check the server feature,
+exported target names, package and codec pins, loopback service readiness,
+conversation identity and cloud authentication. Responses conversion, durable
+restart recovery, all-provider availability and numerical parity remain outside
+this preview. Synthetic transport tests and real cloud tool cycles are separate
+evidence; neither should be described as full reference qualification.
+
+The future local option names the [ggml-org published GGUF candidate](https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/tree/71bc7b627595dc8a91039addd9c791ae548d6747). This is an identity reference, not a download or launch instruction. Mac serving, quantization choice and local ARC profile qualification remain untested; keep the candidate mapping unselected.
