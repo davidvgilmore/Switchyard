@@ -17,9 +17,13 @@ keywords = ["llm", "proxy", "routing", "openai", "anthropic"]
 publish = ["crates-io"]
 
 [features]
+arc-router = ["switchyard-runner/arc-router", "dep:switchyard-arc-router"]
 prefill-router = ["switchyard-runner/prefill-router"]
 
 [dependencies]
+switchyard-arc-router = { path = "../arc-router", optional = true }
+http-body = "1"
+http-body-util = "0.1"
 async-stream.workspace = true
 async-trait.workspace = true
 axum = "0.8"
@@ -50,7 +54,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-http-body-util = "0.1"
 tempfile = "3"
 tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }

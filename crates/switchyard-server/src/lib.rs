@@ -3,6 +3,8 @@
 
 //! Rust HTTP server for libsy algorithms.
 
+#[cfg(feature = "arc-router")]
+mod arc_session;
 mod capabilities;
 pub mod config;
 mod metrics;
@@ -159,6 +161,8 @@ struct DecisionLlmClientResponse {
 /// Shared server state used by all endpoint handlers.
 #[derive(Clone)]
 pub struct ServerState {
+    #[cfg(feature = "arc-router")]
+    arc_sessions: Arc<arc_session::Runtime>,
     runner: Arc<Runner>,
     redactor: Arc<redaction::Redactor>,
     fallback_http: reqwest::Client,
@@ -216,6 +220,8 @@ impl ServerState {
         );
         let redactor = redaction::Redactor::new(runner.provider_api_keys());
         Ok(Self {
+            #[cfg(feature = "arc-router")]
+            arc_sessions: Arc::default(),
             redactor: Arc::new(redactor),
             runner: Arc::new(runner),
             fallback_http,
@@ -1041,10 +1047,19 @@ async fn handle_llm_request(
     routing_log_context: Option<routing_log::RoutingLogContext>,
 ) -> Response {
     let cache_probe = state.track_cache_eligibility.then(|| prefix_probe(&body));
-    let (route, request) = match resolve_route(&state, metadata, body, wire_format) {
+    let (route, mut request) = match resolve_route(&state, metadata, body, wire_format) {
         Ok(resolved) => resolved,
         Err(response) => return response,
     };
+    // ARC native sessions require exact source-format dispatch. Other algorithms
+    // retain their existing backend selection and cross-format translation.
+    if route.algorithm_name() == "arc" {
+        request
+            .metadata
+            .as_mut()
+            .expect("server metadata")
+            .wire_format = Some(wire_format);
+    }
     let routing_log_context = routing_log_context.map(|context| {
         context.with_route(
             request.llm_request.model.as_deref().unwrap_or_default(),
@@ -1058,9 +1073,37 @@ async fn handle_llm_request(
         state.routing_log.clone().zip(routing_log_context.clone()),
     );
 
+    #[cfg(feature = "arc-router")]
+    let arc_pending = arc_session::Pending::new(state.arc_sessions.clone());
+    #[cfg(feature = "arc-router")]
+    if route.algorithm_name() == "arc"
+        && arc_pending.queue(request.metadata.as_ref()).await.is_err()
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            "ARC session settlement is uncertain; recovery required",
+            "invalid_request_error",
+            "arc_session_recovery_required",
+        );
+    }
+    #[cfg(feature = "arc-router")]
+    let observer = arc_pending.observer(observer);
+    #[cfg(feature = "arc-router")]
+    let arc_streaming = request
+        .raw_request
+        .as_ref()
+        .and_then(|v| v.get("stream"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let output = match route.execute(request, Some(observer)).await {
         Ok(output) => output,
         Err(error) => {
+            #[cfg(feature = "arc-router")]
+            if let RunnerError::Algorithm(LibsyError::External { source, .. }) = &error
+                && source.is::<switchyard_arc_router::SessionRecoveryRequired>()
+            {
+                arc_pending.quarantine();
+            }
             if let RunnerError::Algorithm(LibsyError::ClientCall {
                 target,
                 source:
@@ -1121,6 +1164,8 @@ async fn handle_llm_request(
     if let Some(served_model) = served_model.as_ref() {
         attach_routing_headers(&mut response, served_model.as_str());
     }
+    #[cfg(feature = "arc-router")]
+    let response = arc_pending.transport(response, arc_streaming);
     response
 }
 

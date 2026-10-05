@@ -199,12 +199,49 @@ pub struct Metadata {
     pub subagent_identity_unsupported: bool,
     /// Switchyard target that successfully served a response.
     pub served_model: Option<ModelId>,
+    /// A host-prepared native Messages request whose controls and cache intent must survive dispatch.
+    /// This is process-local metadata; HTTP headers and request JSON cannot create it.
+    pub prepared_messages: Option<PreparedMessages>,
+    /// Exact prepared Chat request and private response-codec capability. Never serialized.
+    pub prepared_chat: Option<PreparedChat>,
     /// Arbitrary host-defined key/value metadata.
     pub extra_metadata: Option<BTreeMap<String, String>>,
     /// HTTP headers to attach when forwarding the request/response, if any.
     pub http_headers: Option<http::HeaderMap>,
     /// The wire format the request/response was originally encoded in, if known.
     pub wire_format: Option<WireFormat>,
+}
+
+/// Native Messages prepared by a trusted routing algorithm.
+/// The HTTP client verifies the destination and complete encoded body before sending.
+#[derive(Clone)]
+pub struct PreparedMessages {
+    /// Exact final Messages body, including its destination model.
+    pub body: serde_json::Value,
+}
+
+/// Process-local prepared request. Source identity remains native Messages.
+#[derive(Clone)]
+pub struct PreparedChat {
+    /// Exact provider body, including model and fixed worker controls.
+    pub body: serde_json::Value,
+    /// Normalized view used only to detect host mutations before dispatch.
+    pub normalized: crate::LlmRequest,
+    /// Receipt-bound pinned conversion capability, never provider metadata.
+    pub codec: PinnedResponseCodec,
+}
+
+/// A trusted local service capability for one staged response.
+#[derive(Clone)]
+pub struct PinnedResponseCodec {
+    /// Local session service exposing codec operations.
+    pub endpoint: String,
+    /// Original host owner identity.
+    pub owner_id: String,
+    /// Opaque immutable attempt token.
+    pub session_token: String,
+    /// Exact operator-configured codec source hash.
+    pub implementation_sha256: String,
 }
 
 impl Metadata {

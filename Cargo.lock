@@ -2320,6 +2320,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "switchyard-arc-router"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "switchyard-libsy",
+ "switchyard-protocol",
+ "switchyard-translation",
+ "tokio",
+]
+
+[[package]]
 name = "switchyard-libsy"
 version = "0.3.0"
 dependencies = [
@@ -2429,6 +2443,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strum_macros",
+ "switchyard-arc-router",
  "switchyard-libsy",
  "switchyard-llm-client",
  "switchyard-protocol",
@@ -2449,6 +2464,7 @@ dependencies = [
  "clap",
  "futures-util",
  "http",
+ "http-body",
  "http-body-util",
  "humantime",
  "opentelemetry",
@@ -2461,6 +2477,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "switchyard-arc-router",
  "switchyard-libsy",
  "switchyard-llm-client",
  "switchyard-protocol",

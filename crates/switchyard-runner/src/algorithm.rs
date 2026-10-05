@@ -432,6 +432,13 @@ pub enum AlgorithmSpec {
         #[serde(default = "default_fail_open")]
         fail_open: bool,
     },
+    /// Routes with a pinned local ARC worker.
+    Arc {
+        /// Configuration file containing the worker and action bindings.
+        config: PathBuf,
+        /// Declared completion targets. Bindings must use these names.
+        targets: Vec<String>,
+    },
     /// Routes using a checkpoint-backed prefill classifier.
     PrefillRouter {
         /// Target names in checkpoint output order.
@@ -613,7 +620,9 @@ impl AlgorithmSpec {
             Self::Advisor {
                 executor_target, ..
             } => vec![executor_target],
-            Self::PrefillRouter { targets, .. } => targets.iter().map(String::as_str).collect(),
+            Self::PrefillRouter { targets, .. } | Self::Arc { targets, .. } => {
+                targets.iter().map(String::as_str).collect()
+            }
         }
     }
 
@@ -677,9 +686,9 @@ impl AlgorithmSpec {
     ) -> AlgorithmResult<RuntimeModelNames> {
         let parent = match self {
             Self::Noop { .. } => HashMap::new(),
-            Self::Random { targets, .. } | Self::PrefillRouter { targets, .. } => {
-                category_models([(Category::Any, targets.clone())])
-            }
+            Self::Random { targets, .. }
+            | Self::PrefillRouter { targets, .. }
+            | Self::Arc { targets, .. } => category_models([(Category::Any, targets.clone())]),
             Self::Passthrough { target, .. } => {
                 category_models([(Category::Any, vec![target.clone()])])
             }
@@ -786,7 +795,8 @@ impl AlgorithmSpec {
             | Self::StageRouter { .. }
             | Self::Auto { .. }
             | Self::Composite { .. }
-            | Self::PrefillRouter { .. } => None,
+            | Self::PrefillRouter { .. }
+            | Self::Arc { .. } => None,
         }
     }
 
@@ -1429,6 +1439,42 @@ fn build_algorithm(
                 )
             })?;
             Ok(Arc::new(algorithm))
+        }
+        AlgorithmSpec::Arc {
+            config,
+            targets: names,
+        } => {
+            #[cfg(feature = "arc-router")]
+            {
+                let bytes = std::fs::read(config).map_err(|error| {
+                    AlgorithmConfigError::with_source("cannot read ARC config", error)
+                })?;
+                let mut config: switchyard_arc_router::ArcConfig = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
+                    AlgorithmConfigError::with_source("invalid ARC config", error)
+                })?;
+                for binding in config.actions.values_mut() {
+                    if !names.contains(&binding.target) {
+                        return Err(AlgorithmConfigError::new(
+                            "ARC action target must appear in route targets",
+                        ));
+                    }
+                    binding.target =
+                        resolve_target_model_id(route_name, &binding.target, targets)?.to_string();
+                }
+                Ok(Arc::new(
+                    switchyard_arc_router::ArcRouter::new(config).map_err(|error| {
+                        AlgorithmConfigError::with_source("invalid ARC router", error)
+                    })?,
+                ))
+            }
+            #[cfg(not(feature = "arc-router"))]
+            {
+                let _ = (config, names);
+                Err(AlgorithmConfigError::new(
+                    "ARC routes require the `arc-router` Cargo feature",
+                ))
+            }
         }
         AlgorithmSpec::PrefillRouter {
             targets: names,

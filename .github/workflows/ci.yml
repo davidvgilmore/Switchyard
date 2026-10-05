@@ -122,6 +122,10 @@ jobs:
         run: cargo clippy -p switchyard-server --all-targets --features prefill-router --locked -- -D warnings
       - name: cargo test
         run: cargo test --workspace --locked
+      - name: cargo clippy (arc-router)
+        run: cargo clippy -p switchyard-server --all-targets --features arc-router --locked -- -D warnings
+      - name: cargo test (arc-router)
+        run: cargo test -p switchyard-server --features arc-router --locked
       - name: cargo test (prefill-router)
         run: cargo test -p switchyard-runner --features prefill-router --locked
 

@@ -181,3 +181,17 @@ batch_size = 8
     assert_eq!(max_length, Some(4096));
     assert_eq!(batch_size, Some(8));
 }
+
+#[test]
+fn arc_route_exposes_only_configured_completion_targets() {
+    let spec: AlgorithmSpec = toml::from_str(
+        r#"
+type = "arc"
+config = "/private/arc-bindings.json"
+targets = ["local", "cloud"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(spec.routing_target_names(), ["local", "cloud"]);
+    assert_eq!(spec.callable_target_names(), ["local", "cloud"]);
+}

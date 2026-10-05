@@ -30,6 +30,8 @@ use crate::backend::{Backend, openai_url};
 use crate::error::{LlmClientError, Result};
 use crate::metrics;
 use crate::raw::RawResponse;
+#[path = "prepared_chat.rs"]
+mod prepared_chat;
 
 // Caller headers safe to send when caller auth forwarding is disabled.
 const ALLOWED_METADATA_HEADERS: &[&str] = &["x-request-id"];
@@ -274,25 +276,42 @@ impl TranslatingLlmClient {
         // which keeps the caller's original `model`; force the resolved model so
         // the upstream always sees the target id.
         set_json_model(&mut body, model);
-        if matches!(backend, Backend::OpenAiResponses(_)) {
-            sanitize_openai_responses_provider_body(&mut body);
-        }
-        // Strip before `merge_extra_body` so a target can reinstate either field
-        // deliberately via `extra_body`.
-        if matches!(backend, Backend::Anthropic(_)) {
-            strip_anthropic_incompatible_fields(&mut body);
-            strip_unsigned_thinking_blocks(&mut body);
-        }
-        omit_configured_body_fields(&mut body, backend.omit_body_fields());
-        merge_extra_body(&mut body, backend.extra_body());
-        // After the merge on purpose: the effort override must win over both the caller's
-        // value and any `reasoning` default a target set through `extra_body`.
-        apply_reasoning_effort(&mut body, backend);
-        if matches!(backend, Backend::Anthropic(_)) {
-            enable_anthropic_prompt_caching(&mut body);
-        }
-        if matches!(backend, Backend::OpenAiChat(_)) {
-            ensure_openai_stream_usage(&mut body);
+        if let Some(prepared) = metadata.and_then(|m| m.prepared_messages.as_ref()) {
+            if wire_format != WireFormat::AnthropicMessages
+                || !matches!(backend, Backend::Anthropic(_))
+                || !matches!(endpoint, UpstreamEndpoint::Completion)
+                || !backend.extra_body().is_empty()
+                || !backend.omit_body_fields().is_empty()
+                || backend.reasoning_effort().is_some()
+                || prepared.body != body
+            {
+                return Err(LlmClientError::RequestEncoding(
+                    "prepared Messages request changed or targets an incompatible backend".into(),
+                ));
+            }
+            // The session service has already applied history sanitation, private
+            // steering, and fixed worker controls. Do not add cache intent here.
+        } else {
+            if matches!(backend, Backend::OpenAiResponses(_)) {
+                sanitize_openai_responses_provider_body(&mut body);
+            }
+            // Strip before `merge_extra_body` so a target can reinstate either field
+            // deliberately via `extra_body`.
+            if matches!(backend, Backend::Anthropic(_)) {
+                strip_anthropic_incompatible_fields(&mut body);
+                strip_unsigned_thinking_blocks(&mut body);
+            }
+            omit_configured_body_fields(&mut body, backend.omit_body_fields());
+            merge_extra_body(&mut body, backend.extra_body());
+            // After the merge on purpose: the effort override must win over both the caller's
+            // value and any `reasoning` default a target set through `extra_body`.
+            apply_reasoning_effort(&mut body, backend);
+            if matches!(backend, Backend::Anthropic(_)) {
+                enable_anthropic_prompt_caching(&mut body);
+            }
+            if matches!(backend, Backend::OpenAiChat(_)) {
+                ensure_openai_stream_usage(&mut body);
+            }
         }
         let streaming = endpoint.allows_streaming()
             && body.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -426,6 +445,25 @@ impl TranslatingLlmClient {
         }
     }
 
+    fn authenticated_request(
+        &self,
+        url: &str,
+        backend: &Backend,
+        body: &Value,
+        metadata: Option<&Metadata>,
+    ) -> reqwest::RequestBuilder {
+        let client = if backend.is_forwarding_auth() {
+            &self.forward_auth_client
+        } else {
+            &self.client
+        };
+        let builder = client.post(url).json(body);
+        let builder = forward_metadata_headers(builder, metadata, backend);
+        let builder = backend.apply_forwarded_auth(builder, metadata);
+        let builder = apply_extra_headers(builder, backend);
+        backend.apply_auth(builder)
+    }
+
     // Performs one HTTP attempt and retains the retry metadata alongside any error.
     async fn send_once(
         &self,
@@ -436,16 +474,7 @@ impl TranslatingLlmClient {
         model: &ModelId,
         streaming: bool,
     ) -> std::result::Result<EncodedResponse, AttemptFailure> {
-        let client = if backend.is_forwarding_auth() {
-            &self.forward_auth_client
-        } else {
-            &self.client
-        };
-        let builder = client.post(url).json(body);
-        let builder = forward_metadata_headers(builder, metadata, backend);
-        let builder = backend.apply_forwarded_auth(builder, metadata);
-        let builder = apply_extra_headers(builder, backend);
-        let builder = backend.apply_auth(builder);
+        let builder = self.authenticated_request(url, backend, body, metadata);
 
         let response = match builder.send().await {
             Ok(response) => response,
@@ -557,6 +586,11 @@ impl TranslatingLlmClient {
             })?;
         llm_request.model = Some(model_id.to_string());
 
+        if metadata.as_ref().is_some_and(|m| m.prepared_chat.is_some()) {
+            return self
+                .call_prepared_chat(llm_request, metadata, &model_id)
+                .await;
+        }
         let orig_format = metadata.as_ref().and_then(|m| m.wire_format);
         let wire_format = orig_format.unwrap_or(
             self.model_to_config
@@ -3299,5 +3333,51 @@ mod tests {
             )
             .await?;
         Ok(())
+    }
+    #[tokio::test]
+    async fn prepared_messages_reject_body_or_backend_mutation_before_network() {
+        let base = "http://127.0.0.1:1/v1";
+        let body = json!({"model":"claude","max_tokens":32,"messages":[{"role":"user","content":"synthetic"}]});
+        let client = TranslatingLlmClient::new(&anthropic_map(base)).unwrap();
+        for mutation in 0..5 {
+            let mut prepared = body.clone();
+            let mut backend_config = config(base);
+            match mutation {
+                0 => prepared["max_tokens"] = json!(64),
+                1 => {
+                    backend_config
+                        .extra_body
+                        .insert("temperature".into(), json!(0));
+                }
+                2 => {
+                    backend_config.omit_body_fields.insert("thinking".into());
+                }
+                3 => backend_config.reasoning_effort = Some("high".into()),
+                _ => {}
+            }
+            let backend = if mutation == 4 {
+                Backend::OpenAiChat(backend_config)
+            } else {
+                Backend::Anthropic(backend_config)
+            };
+            let metadata = Metadata {
+                prepared_messages: Some(switchyard_protocol::PreparedMessages { body: prepared }),
+                ..Default::default()
+            };
+            let result = client
+                .send_encoded(
+                    &backend,
+                    WireFormat::AnthropicMessages,
+                    decode_request(WireFormat::AnthropicMessages, &body).unwrap(),
+                    Some(&metadata),
+                    &ModelId::from("claude"),
+                    UpstreamEndpoint::Completion,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(LlmClientError::RequestEncoding(_))),
+                "mutation {mutation} escaped prepared guard"
+            );
+        }
     }
 }
