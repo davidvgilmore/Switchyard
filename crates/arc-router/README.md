@@ -216,9 +216,20 @@ Tests use a synthetic loopback worker and public invented inputs. They test the
 native libsy routing path and exact-format outgoing control preservation. They
 do not execute an encoder, load Hugging Face weights, or establish ARC parity.
 
-Remaining acceptance requires pinned private package weights, actual local
-encoder and both heads, VSR reference decisions, matching session sequences,
-all package actions (including steering), and final provider-wire comparison.
+A separate private development check ran nine native Messages requests through
+one resident local ARC encoder and both heads, using the ordinary installed
+server. It covered a tool result, new user turns, two sessions, the next model
+selection boundary, and compaction. Actual decisions controlled private steering
+emission and replay. The check compared every provider request and committed
+assistant response. All nine decisions selected Opus; provider responses were
+synthetic. This establishes that session flow, not mixed-model routing or real
+provider generation.
+
+The native encoder's numerical parity remains unqualified. Launch acceptance
+still requires VSR reference parity, broader package-action coverage, actual
+provider behavior, and the remaining retry, cache-eviction, worker-loss and
+recovery cases. The runtime remains in memory; this check does not establish
+durable restart or native streaming.
 Ordinary native Messages ingress can use the session mode above. Its HTTP
 composition tests use a synthetic service and provider; they establish no
 local encoder, head, or reference-decision parity. Explicit replay still needs
